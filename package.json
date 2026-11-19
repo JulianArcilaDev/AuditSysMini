@@ -1,0 +1,22 @@
+{
+  "name": "auditsys-mini",
+  "version": "1.0.0",
+  "description": "AuditSys Mini – Sistema de Gestión de Auditorías de Sistemas de Información (ISO/IEC 27001/27002:2022)",
+  "type": "module",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server/index.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch server/index.js",
+    "seed": "node --no-warnings=ExperimentalWarning server/seed.js",
+    "seed:demo": "node --no-warnings=ExperimentalWarning server/seed.js --demo",
+    "test": "node --no-warnings=ExperimentalWarning --test tests/*.test.js"
+  },
+  "keywords": ["auditoria", "iso27001", "iso27002", "seguridad"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
