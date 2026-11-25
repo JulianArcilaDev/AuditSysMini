@@ -1,0 +1,42 @@
+# AuditSys Mini · entorno local con Docker Compose (API + PostgreSQL)
+#   docker compose up --build -d     → levanta todo
+#   docker compose logs -f app       → ver logs de la API
+#   docker compose down              → detener (los datos se conservan en el volumen)
+#   docker compose down -v           → detener y borrar los datos
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-auditsys}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auditsys}
+      POSTGRES_DB: ${POSTGRES_DB:-auditsys}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      POSTGRES_HOST: db            # nombre del servicio, no localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-auditsys}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auditsys}
+      POSTGRES_DB: ${POSTGRES_DB:-auditsys}
+      COOKIE_SECURE: "false"       # en local se usa HTTP; en Render (HTTPS) queda en true
+      AUDITSYS_SECRET: ${AUDITSYS_SECRET:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

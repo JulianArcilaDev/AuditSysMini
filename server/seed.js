@@ -1,11 +1,11 @@
 // Carga inicial: catálogo ISO/IEC 27002:2022 (93 controles), usuarios de prueba y
 // auditoría simulada de "Empresa ABC" (datos ficticios, ver documento de ejemplo del curso).
-//   npm run seed        → crea catálogo y usuarios si no existen
+//   npm run seed        → crea catálogo y usuarios si no existen (requiere PostgreSQL)
 //   npm run seed:demo   → (re)crea la auditoría de ejemplo de Empresa ABC
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getDb, tx } from './db.js';
+import { initDb, closeDb, query, one, tx } from './db.js';
 import { hashPassword } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,22 +28,24 @@ const PREGUNTAS = {
 };
 
 // Usuarios de prueba (solo para entorno académico/local; cambie las contraseñas en producción)
+// Usuarios de prueba. En un despliegue público cambie las contraseñas con las variables
+// ADMIN_PASSWORD y AUDITOR_PASSWORD (solo se aplican al crear los usuarios por primera vez).
 export const USUARIOS_DEMO = [
-  { nombre: 'Administrador AuditSys', correo: 'admin@auditsys.local', password: 'Admin2026*', rol: 'admin' },
-  { nombre: 'Ana R. (Auditora líder)', correo: 'ana@auditsys.local', password: 'Auditor2026*', rol: 'auditor' },
-  { nombre: 'Carlos M. (Auditor)', correo: 'carlos@auditsys.local', password: 'Auditor2026*', rol: 'auditor' },
+  { nombre: 'Administrador AuditSys', correo: 'admin@auditsys.local', password: process.env.ADMIN_PASSWORD || 'Admin2026*', rol: 'admin' },
+  { nombre: 'Ana R. (Auditora líder)', correo: 'ana@auditsys.local', password: process.env.AUDITOR_PASSWORD || 'Auditor2026*', rol: 'auditor' },
+  { nombre: 'Carlos M. (Auditor)', correo: 'carlos@auditsys.local', password: process.env.AUDITOR_PASSWORD || 'Auditor2026*', rol: 'auditor' },
 ];
 
-export function seedBase() {
-  const db = getDb();
+export async function seedBase() {
   const catalogo = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'controles-iso27002.json'), 'utf8'));
-  tx(() => {
-    const ins = db.prepare(`INSERT OR IGNORE INTO control (codigo_iso, nombre, categoria, criterio, pregunta, ejemplo, evidencia_sugerida)
-      VALUES (?,?,?,?,?,?,?)`);
+  await tx(async () => {
     for (const c of catalogo)
-      ins.run(c.codigo, c.nombre, c.categoria, c.descripcion, PREGUNTAS[c.codigo] ?? null, c.ejemplo ?? null, c.evidencia_sugerida ?? null);
-    const insU = db.prepare('INSERT OR IGNORE INTO usuario (nombre, correo, password_hash, rol) VALUES (?,?,?,?)');
-    for (const u of USUARIOS_DEMO) insU.run(u.nombre, u.correo, hashPassword(u.password), u.rol);
+      await query(`INSERT INTO control (codigo_iso, nombre, categoria, criterio, pregunta, ejemplo, evidencia_sugerida)
+        VALUES (?,?,?,?,?,?,?) ON CONFLICT (codigo_iso) DO NOTHING`,
+      [c.codigo, c.nombre, c.categoria, c.descripcion, PREGUNTAS[c.codigo] ?? null, c.ejemplo ?? null, c.evidencia_sugerida ?? null]);
+    for (const u of USUARIOS_DEMO)
+      await query('INSERT INTO usuario (nombre, correo, password_hash, rol) VALUES (?,?,?,?) ON CONFLICT (correo) DO NOTHING',
+        [u.nombre, u.correo, hashPassword(u.password), u.rol]);
   });
 }
 
@@ -100,57 +102,57 @@ const HALLAZGOS = [
     ['Centralizar los registros críticos, proteger su integridad y definir una revisión periódica.', 'MEDIA', 120, 'Administrador de servidores']],
 ];
 
-export function seedDemo() {
-  const db = getDb();
-  const ana = db.prepare("SELECT id_usuario FROM usuario WHERE correo = 'ana@auditsys.local'").get();
+export async function seedDemo() {
+  const ana = await one("SELECT id_usuario FROM usuario WHERE correo = 'ana@auditsys.local'");
   if (!ana) throw new Error('Ejecute primero la carga base.');
-  return tx(() => {
-    db.prepare("DELETE FROM auditoria WHERE organizacion = 'Empresa ABC (ficticia)'").run();
-    const a = db.prepare(`INSERT INTO auditoria (organizacion, objetivo, alcance, referentes, fecha_inicio, fecha_fin, estado, id_auditor)
-      VALUES (?,?,?,?,?,?,?,?)`).run(
+  return tx(async () => {
+    await query("DELETE FROM auditoria WHERE organizacion = 'Empresa ABC (ficticia)'");
+    const { id_auditoria: idA } = await one(`INSERT INTO auditoria (organizacion, objetivo, alcance, referentes, fecha_inicio, fecha_fin, estado, id_auditor)
+      VALUES (?,?,?,?,?,?,?,?) RETURNING id_auditoria`, [
       'Empresa ABC (ficticia)',
       'Evaluar el estado de implementación de 13 controles seleccionados de ISO/IEC 27002:2022 en los servicios de TI de la organización.',
       'Servidores, estaciones de trabajo, aplicaciones empresariales, bases de datos de clientes, red corporativa y usuarios internos y externos.',
       'ISO 19011:2018 (principios de auditoría); ISO/IEC 27001:2022; ISO/IEC 27002:2022',
-      '2026-11-09', '2026-11-20', 'EN_REVISION', ana.id_usuario);
-    const idA = Number(a.lastInsertRowid);
-    const ctrl = db.prepare('SELECT id_control FROM control WHERE codigo_iso = ?');
-    const insE = db.prepare(`INSERT INTO evaluacion_control (id_auditoria, id_control, estado, observacion, justificacion_na, evaluado_en) VALUES (?,?,?,?,?,datetime('now'))`);
-    const insV = db.prepare(`INSERT INTO evidencia (id_evaluacion, codigo, descripcion, tipo, fuente, fecha, referencia, es_simulada) VALUES (?,?,?,?,?,?,?,1)`);
+      '2026-11-09', '2026-11-20', 'EN_REVISION', ana.id_usuario]);
     const evalIds = {};
     let nEv = 0;
-    EVALS.forEach(([cod, estado, obs, just, evs], i) => {
-      const e = insE.run(idA, ctrl.get(cod).id_control, estado, obs, just);
-      evalIds[cod] = Number(e.lastInsertRowid);
+    for (const [i, [cod, estado, obs, just, evs]] of EVALS.entries()) {
+      const e = await one(`INSERT INTO evaluacion_control (id_auditoria, id_control, estado, observacion, justificacion_na, evaluado_en)
+        SELECT ?, id_control, ?, ?, ?, now() FROM control WHERE codigo_iso = ? RETURNING id_evaluacion`, [idA, estado, obs, just, cod]);
+      evalIds[cod] = e.id_evaluacion;
       for (const [desc, tipo, fuente, ref] of evs) {
         nEv++;
         const dia = String(10 + (i % 8)).padStart(2, '0');
-        insV.run(evalIds[cod], `EV-${String(nEv).padStart(2, '0')}`, `${desc} (simulada)`, tipo, fuente, `2026-11-${dia}`, ref);
+        await query('INSERT INTO evidencia (id_evaluacion, codigo, descripcion, tipo, fuente, fecha, referencia, es_simulada) VALUES (?,?,?,?,?,?,?,1)',
+          [evalIds[cod], `EV-${String(nEv).padStart(2, '0')}`, `${desc} (simulada)`, tipo, fuente, `2026-11-${dia}`, ref]);
       }
-    });
-    const insH = db.prepare(`INSERT INTO hallazgo (id_evaluacion, id_auditoria, codigo, condicion, criterio, causa, efecto_riesgo, severidad) VALUES (?,?,?,?,?,?,?,?)`);
-    const insR = db.prepare('INSERT INTO recomendacion (id_hallazgo, codigo, descripcion, prioridad, plazo_dias, responsable) VALUES (?,?,?,?,?,?)');
-    HALLAZGOS.forEach(([cod, sev, cond, crit, causa, efecto, rec], i) => {
+    }
+    for (const [i, [cod, sev, cond, crit, causa, efecto, rec]] of HALLAZGOS.entries()) {
       const n = String(i + 1).padStart(2, '0');
-      const h = insH.run(evalIds[cod], idA, `H-${n}`, cond, crit, causa, efecto, sev);
-      insR.run(Number(h.lastInsertRowid), `R-${n}`, ...rec);
-    });
+      const h = await one(`INSERT INTO hallazgo (id_evaluacion, id_auditoria, codigo, condicion, criterio, causa, efecto_riesgo, severidad)
+        VALUES (?,?,?,?,?,?,?,?) RETURNING id_hallazgo`, [evalIds[cod], idA, `H-${n}`, cond, crit, causa, efecto, sev]);
+      await query('INSERT INTO recomendacion (id_hallazgo, codigo, descripcion, prioridad, plazo_dias, responsable) VALUES (?,?,?,?,?,?)',
+        [h.id_hallazgo, `R-${n}`, ...rec]);
+    }
     return idA;
   });
 }
 
-export function seedIfEmpty() {
-  const db = getDb();
-  const vacio = db.prepare('SELECT COUNT(*) n FROM control').get().n === 0;
-  seedBase();
-  if (vacio && process.env.AUDITSYS_NO_DEMO !== '1') seedDemo();
+export async function seedIfEmpty() {
+  const { n } = await one('SELECT COUNT(*) AS n FROM control');
+  await seedBase();
+  if (n === 0 && process.env.AUDITSYS_NO_DEMO !== '1') {
+    await seedDemo();
+    console.log('Carga inicial: catálogo de 93 controles, usuarios de prueba y auditoría simulada de Empresa ABC.');
+  }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  seedBase();
-  console.log('Catálogo (93 controles) y usuarios de prueba cargados.');
-  if (process.argv.includes('--demo')) {
-    const idA = seedDemo();
-    console.log(`Auditoría simulada de Empresa ABC creada (id ${idA}).`);
-  }
+  (async () => {
+    await initDb();
+    await seedBase();
+    console.log('Catálogo (93 controles) y usuarios de prueba cargados.');
+    if (process.argv.includes('--demo')) console.log(`Auditoría simulada de Empresa ABC creada (id ${await seedDemo()}).`);
+    await closeDb();
+  })().catch(async (e) => { console.error(e.message); await closeDb(); process.exit(1); });
 }

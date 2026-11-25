@@ -1,22 +1,32 @@
 {
   "name": "auditsys-mini",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AuditSys Mini – Sistema de Gestión de Auditorías de Sistemas de Información (ISO/IEC 27001/27002:2022)",
   "type": "module",
   "main": "server/index.js",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.9"
   },
   "scripts": {
-    "start": "node --no-warnings=ExperimentalWarning server/index.js",
-    "dev": "node --no-warnings=ExperimentalWarning --watch server/index.js",
-    "seed": "node --no-warnings=ExperimentalWarning server/seed.js",
-    "seed:demo": "node --no-warnings=ExperimentalWarning server/seed.js --demo",
-    "test": "node --no-warnings=ExperimentalWarning --test tests/*.test.js"
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev": "node --env-file-if-exists=.env --watch server/index.js",
+    "seed": "node --env-file-if-exists=.env server/seed.js",
+    "seed:demo": "node --env-file-if-exists=.env server/seed.js --demo",
+    "test": "node --test tests/*.test.js",
+    "db:up": "docker compose up -d db",
+    "docker:up": "docker compose up --build -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f app"
   },
-  "keywords": ["auditoria", "iso27001", "iso27002", "seguridad"],
+  "keywords": [
+    "auditoria",
+    "iso27001",
+    "iso27002",
+    "seguridad"
+  ],
   "license": "MIT",
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^5.1.0",
+    "pg": "^8.13.1"
   }
 }

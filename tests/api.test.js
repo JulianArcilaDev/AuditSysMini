@@ -1,16 +1,20 @@
 // Pruebas automatizadas de la API: casos CP-01 a CP-13 del plan de pruebas.
-// Ejecutar: npm test   (usa una base de datos temporal; no toca los datos reales)
+// Requieren PostgreSQL: `npm run db:up` (contenedor de docker compose) y luego `npm test`.
+// Usan una base separada (auditsys_test) que se crea y se limpia en cada ejecución.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import pg from 'pg';
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'auditsys-test-'));
-process.env.AUDITSYS_DATA_DIR = tmp;
+const ADMIN_URL = process.env.TEST_ADMIN_DATABASE_URL || 'postgresql://auditsys:auditsys@localhost:5433/auditsys';
+const TEST_DB = 'auditsys_test';
+const testUrl = new URL(ADMIN_URL);
+testUrl.pathname = `/${TEST_DB}`;
+process.env.DATABASE_URL = testUrl.toString();
 process.env.AUDITSYS_SECRET = 'test-secret';
+delete process.env.POSTGRES_HOST;
 
-const { getDb, closeDb } = await import('../server/db.js');
+const { initDb, closeDb, query } = await import('../server/db.js');
+const { initSecret } = await import('../server/auth.js');
 const { seedIfEmpty } = await import('../server/seed.js');
 const { createApp } = await import('../server/app.js');
 
@@ -18,12 +22,19 @@ let server;
 let base;
 
 before(async () => {
-  getDb();
-  seedIfEmpty();
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  await admin.connect();
+  const { rowCount } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [TEST_DB]);
+  if (!rowCount) await admin.query(`CREATE DATABASE ${TEST_DB}`);
+  await admin.end();
+  await query('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
+  await initDb();
+  await initSecret();
+  await seedIfEmpty();
   await new Promise((res) => { server = createApp().listen(0, '127.0.0.1', res); });
   base = `http://127.0.0.1:${server.address().port}/api`;
 });
-after(() => { server.close(); closeDb(); fs.rmSync(tmp, { recursive: true, force: true }); });
+after(async () => { server.close(); await closeDb(); });
 
 /** Cliente HTTP con cookie de sesión. */
 function client() {
@@ -229,8 +240,7 @@ test('CP-11 Dashboard → coincide con el informe', async () => {
 });
 
 test('CP-12 Persistencia → los datos permanecen tras cerrar y reabrir la BD', async () => {
-  closeDb();
-  getDb();
+  await closeDb(); // se cierra el pool; la siguiente consulta abre conexiones nuevas
   const { data } = await ana.get(`/auditorias/${audId}`);
   assert.equal(data.evaluaciones.length, 13);
   assert.equal(data.indicadores.cumplimiento_base, 33.3);
@@ -252,10 +262,16 @@ test('CP-13 Acceso por rol y auditoría cerrada → acceso denegado', async () =
   assert.equal((await admin.put(`/auditorias/${audId}`, AUD)).status, 409);
 });
 
-test('Integridad en BD: restricciones CHECK impiden datos inválidos aunque se salte la API', () => {
-  const db = getDb();
-  assert.throws(() => db.prepare("UPDATE evaluacion_control SET estado='NO_APLICABLE', justificacion_na=NULL WHERE id_evaluacion=?").run(evals['8.31']), /CHECK/);
-  assert.throws(() => db.prepare("UPDATE auditoria SET fecha_fin='2000-01-01' WHERE id_auditoria=?").run(audId), /CHECK/);
-  assert.throws(() => db.prepare("INSERT INTO hallazgo (id_evaluacion,id_auditoria,codigo,condicion,criterio,causa,efecto_riesgo,severidad) VALUES (?,?,?,?,?,?,?,?)")
-    .run(999999, audId, 'H-99', 'x'.repeat(20), 'x'.repeat(20), 'xxxxxx', 'x'.repeat(20), 'ALTA'), /FOREIGN KEY/);
+test('Integridad en BD: restricciones CHECK y FOREIGN KEY impiden datos inválidos aunque se salte la API', async () => {
+  await assert.rejects(query("UPDATE evaluacion_control SET estado='NO_APLICABLE', justificacion_na=NULL WHERE id_evaluacion=$1", [evals['8.31']]), { code: '23514' });
+  await assert.rejects(query("UPDATE auditoria SET fecha_fin='2000-01-01' WHERE id_auditoria=$1", [audId]), { code: '23514' });
+  await assert.rejects(query(`INSERT INTO hallazgo (id_evaluacion,id_auditoria,codigo,condicion,criterio,causa,efecto_riesgo,severidad)
+    VALUES ($1,$2,'H-99',repeat('x',20),repeat('x',20),'xxxxxx',repeat('x',20),'ALTA')`, [999999, audId]), { code: '23503' });
+});
+
+test('Salud del servicio: /health y /api/health (consulta la BD)', async () => {
+  const h = await fetch(base.replace('/api', '/health')).then((r) => r.json());
+  assert.equal(h.status, 'ok');
+  const d = await fetch(`${base}/health`).then((r) => r.json());
+  assert.equal(d.database, 'postgresql');
 });

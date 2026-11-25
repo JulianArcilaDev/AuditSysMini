@@ -8,37 +8,74 @@ Aplicación web que permite configurar una auditoría de seguridad de la informa
 
 ---
 
+**Producción:** <https://URL-DE-RENDER.onrender.com> · **Repositorio:** <https://github.com/JulianArcilaDev/AuditSysMini>
+
 ## 1. Ejecución
 
-Requisitos: **Node.js 22.13 o superior** (usa el módulo SQLite integrado `node:sqlite`; no requiere instalar un motor de base de datos).
+### Opción A · Docker Compose (recomendada)
+
+Requisito: Docker Desktop en ejecución.
 
 ```bash
-npm install
-npm start
+docker compose up --build -d     # o: npm run docker:up
 ```
 
-Abrir <http://localhost:3000>. En el primer arranque se crea `data/auditsys.db` con:
+Abrir <http://localhost:3000>. Compose levanta dos servicios en la misma red:
+
+| Servicio | Imagen | Puerto en tu PC | Detalle |
+|---|---|---|---|
+| `db` | `postgres:16-alpine` | `5433` | Volumen `pgdata` para conservar los datos; healthcheck con `pg_isready` |
+| `app` | construida con el `Dockerfile` | `3000` | Se conecta a la base por el nombre del servicio (`POSTGRES_HOST=db`), no por `localhost`; arranca cuando `db` está *healthy* |
+
+| Comando | Uso |
+|---|---|
+| `npm run docker:up` | `docker compose up --build -d` |
+| `npm run docker:logs` | `docker compose logs -f app` |
+| `npm run docker:down` | `docker compose down` (los datos se conservan) |
+| `docker compose down -v` | Detiene y **borra** los datos |
+
+Pruebas de humo:
+
+```bash
+curl http://localhost:3000/health        # {"status":"ok","service":"auditsys-mini",...}
+curl http://localhost:3000/api/health    # {"status":"ok","database":"postgresql",...}
+```
+
+### Opción B · Node.js local + PostgreSQL en Docker
+
+Requisitos: Node.js 22.9 o superior.
+
+```bash
+cp .env.example .env
+npm install
+npm run db:up        # solo el contenedor de PostgreSQL (localhost:5433)
+npm run dev
+```
+
+### Pruebas automatizadas
+
+```bash
+npm run db:up
+npm test             # CP-01 a CP-13 contra una base aparte (auditsys_test)
+```
+
+En el primer arranque la aplicación crea las tablas y carga:
 
 - el catálogo completo de 93 controles de ISO/IEC 27002:2022 (criterio, ejemplo de aplicación y evidencia sugerida),
 - los usuarios de prueba,
 - la auditoría simulada de **Empresa ABC (ficticia)** con 13 controles, 12 evidencias, 4 hallazgos y 4 recomendaciones (estado *En revisión*, lista para cerrar en la sustentación).
 
-| Comando | Uso |
-|---|---|
-| `npm start` | Inicia el servidor (puerto `PORT`, por defecto 3000) |
-| `npm run dev` | Inicia con recarga automática |
-| `npm test` | Ejecuta las pruebas automatizadas CP-01 a CP-13 (BD temporal) |
-| `npm run seed:demo` | Vuelve a crear la auditoría de ejemplo de Empresa ABC |
+`npm run seed:demo` vuelve a crear la auditoría de ejemplo. Las variables de entorno están documentadas en [.env.example](.env.example).
 
-Variables opcionales: `PORT`, `HOST`, `AUDITSYS_DATA_DIR` (carpeta de datos), `AUDITSYS_SECRET` (clave de firma de sesiones), `AUDITSYS_NO_DEMO=1` (no cargar la auditoría de ejemplo en una BD nueva). Para empezar desde cero basta con borrar la carpeta `data/`.
-
-### Usuarios de prueba (solo entorno académico/local)
+### Usuarios de prueba
 
 | Rol | Correo | Contraseña |
 |---|---|---|
 | Administrador | `admin@auditsys.local` | `Admin2026*` |
 | Auditora líder (responsable de Empresa ABC) | `ana@auditsys.local` | `Auditor2026*` |
 | Auditor | `carlos@auditsys.local` | `Auditor2026*` |
+
+En el despliegue público las contraseñas iniciales se reemplazan con las variables `ADMIN_PASSWORD` y `AUDITOR_PASSWORD`.
 
 ---
 
@@ -48,12 +85,14 @@ Variables opcionales: `PORT`, `HOST`, `AUDITSYS_DATA_DIR` (carpeta de datos), `A
 |---|---|---|
 | Frontend | HTML5, CSS3 y JavaScript (módulos ES) sin framework | Sin paso de compilación; cada pantalla es un módulo pequeño y fácil de explicar en la sustentación. |
 | Backend | Node.js + Express | API REST sencilla, validación en servidor y control de acceso. |
-| Base de datos | SQLite (`node:sqlite`) | Persistencia real con llaves foráneas y restricciones `CHECK`, sin instalar servidores. El esquema es portable a PostgreSQL/MySQL. |
+| Base de datos | PostgreSQL 16 (driver `pg`) | Persistencia real con llaves foráneas, `CHECK`, `JSONB` y transacciones. En producción es una base administrada de Render. |
+| Contenedores | Docker (multi-stage) + Docker Compose | La misma imagen corre en el PC y en Render. |
+| Despliegue | Render (Web Service Docker + PostgreSQL) | Despliegue continuo: cada push a `main` publica una versión nueva. |
 
 Arquitectura de tres capas, monolito modular (el documento orientador pide una arquitectura sencilla y desplegable, sin microservicios):
 
 ```
-Navegador (SPA)  ──HTTP/JSON──▶  Express (rutas → servicios)  ──SQL──▶  SQLite
+Navegador (SPA)  ──HTTP/JSON──▶  Express (rutas → servicios)  ──SQL──▶  PostgreSQL
 public/js/views/*                 server/routes/*                       server/schema.sql
                                   server/services/auditoria.js
 ```
@@ -62,9 +101,9 @@ public/js/views/*                 server/routes/*                       server/s
 
 ```
 server/
-  index.js            arranque
+  index.js            arranque: espera a PostgreSQL, crea el esquema y carga datos iniciales
   app.js              Express: cabeceras de seguridad, rutas, manejo de errores
-  db.js               conexión, transacciones, bitácora, códigos secuenciales
+  db.js               pool de PostgreSQL, transacciones, bitácora, códigos secuenciales
   schema.sql          modelo relacional con restricciones
   auth.js             contraseñas (scrypt), sesión firmada (HMAC), roles
   validators.js       validación en servidor
@@ -77,7 +116,11 @@ public/
   js/app.js (enrutador), api.js, ui.js
   js/views/           una vista por pantalla
 tests/api.test.js     casos CP-01 a CP-13
-docs/                 modelo de datos, casos de uso e informe de pruebas
+docs/                 modelo de datos, casos de uso, informe de pruebas y guía de despliegue
+Dockerfile            imagen multi-stage (deps → runtime), usuario no root, healthcheck
+docker-compose.yml    app + PostgreSQL para desarrollo local
+.dockerignore         excluye node_modules, .git, .env, datos y pruebas de la imagen
+.env.example          variables de entorno
 ```
 
 ---
@@ -96,7 +139,7 @@ docs/                 modelo de datos, casos de uso e informe de pruebas
 | RF08 | Generar informe | Paso *Informe* (versionado, imprimible / PDF) |
 | RF09 | Dashboard de indicadores de gestión | Dashboard |
 | RNF01 | Usabilidad y adaptabilidad | Diseño responsivo (menú plegable, una columna, botones ≥ 44 px) |
-| RNF02 | Persistencia | SQLite en `data/auditsys.db` |
+| RNF02 | Persistencia | PostgreSQL (volumen `pgdata` en local; base administrada en Render). Los archivos de evidencia también se guardan en la BD |
 | RNF03 | Validación | En cliente (mensajes junto al campo) y en servidor; restricciones `CHECK` en BD |
 | RNF04 | Seguridad básica | Ver sección 5 |
 | RNF05 | Trazabilidad | Llaves foráneas + paso *Trazabilidad* con alertas de vacíos |
@@ -140,15 +183,28 @@ Ejemplo de Empresa ABC: 4 implementados, 5 parciales, 3 no implementados y 1 no 
 - **Roles**: `auditor` gestiona solo sus auditorías y consulta el catálogo; `admin` además administra el catálogo y los usuarios, y puede asignar responsables.
 - Solo el auditor responsable o un administrador modifica una auditoría; una auditoría cerrada es de solo lectura.
 - Consultas parametrizadas (sin concatenar SQL), escape de HTML en todas las vistas, Content-Security-Policy sin scripts en línea, `X-Frame-Options`, `nosniff`.
-- Archivos de evidencia limitados a 5 MB y a extensiones permitidas; se guardan con nombre aleatorio y se descargan como adjunto.
+- Archivos de evidencia limitados a 5 MB y a extensiones permitidas; se guardan en la BD (`BYTEA`) y se descargan como adjunto.
+- El contenedor se ejecuta con el usuario sin privilegios `node`; las credenciales viven en variables de entorno, nunca en el repositorio.
 - Bitácora (`bitacora`) de inicios de sesión, cambios de estado y operaciones de creación, actualización y eliminación.
 
 ---
 
-## 6. Pruebas
+## 6. Despliegue en Render
 
-`npm test` ejecuta 15 pruebas automatizadas (CP-01 a CP-13 del plan, autenticación e integridad de la BD) contra una base de datos temporal. Resultados y casos manuales: [docs/informe-pruebas.md](docs/informe-pruebas.md).
+La aplicación se publica como **Web Service (Docker)** conectado a una **base PostgreSQL de Render**, ambos en el plan Free y en la misma región. Paso a paso: [docs/despliegue-render.md](docs/despliegue-render.md).
 
-## 7. Referentes
+| Pieza local (`docker-compose.yml`) | En Render |
+|---|---|
+| `app` (`build: .`) | Web Service · Language **Docker** · Health Check Path `/health` |
+| `db` (`postgres:16-alpine`) | Render PostgreSQL 16 (Free) |
+| Variables en `environment` | Pestaña **Environment** del Web Service |
+
+Con **Auto-Deploy: On Commit**, cada `git push` a `main` construye la imagen y la publica sin caída; si el build falla, sigue en línea la versión anterior.
+
+## 7. Pruebas
+
+`npm test` ejecuta 16 pruebas automatizadas (CP-01 a CP-13 del plan, autenticación, integridad de la BD y salud del servicio) contra una base PostgreSQL de prueba. Resultados y casos manuales: [docs/informe-pruebas.md](docs/informe-pruebas.md).
+
+## 8. Referentes
 
 ISO 19011:2018 · ISO/IEC 27001:2022 · ISO/IEC 27002:2022 · ISO 31000:2018 (complementario) · ISO/IEC 25010:2023. Todos los datos de Empresa ABC son ficticios y se usan solo con fines académicos.
