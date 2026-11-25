@@ -1,10 +1,10 @@
 # Informe de pruebas · AuditSys Mini
 
-**Fecha de ejecución:** 18 de noviembre de 2026 · **Versión:** 1.0.0 · **Entorno:** macOS, Node.js 22.14, SQLite 3.47 (integrado)
+**Fecha de ejecución:** 25 de noviembre de 2026 · **Versión:** 1.1.0 · **Entorno:** macOS, Node.js 22.14, PostgreSQL 16 (contenedor `postgres:16-alpine`), Docker 29
 
 ## 1. Pruebas automatizadas (`npm test`)
 
-Se ejecutan contra una base de datos temporal, con el servidor real (HTTP) y las mismas reglas que usa la interfaz.
+Se ejecutan con `npm run db:up && npm test` contra una base PostgreSQL de prueba (`auditsys_test`, se recrea en cada ejecución), con el servidor real (HTTP) y las mismas reglas que usa la interfaz.
 
 | ID | Caso | Datos de entrada | Resultado esperado | Resultado |
 |---|---|---|---|---|
@@ -22,9 +22,10 @@ Se ejecutan contra una base de datos temporal, con el servidor real (HTTP) y las
 | CP-11 | Dashboard | Datos de la auditoría | Valores iguales a los del informe | ✅ Aprobado |
 | CP-12 | Persistencia | Cerrar y reabrir la conexión a la BD | Los datos permanecen | ✅ Aprobado |
 | CP-13 | Acceso por rol y cierre | Auditor edita catálogo; auditor ajeno edita evaluación; edición tras cierre | 403, 403 y 409 (acceso denegado) | ✅ Aprobado |
-| — | Integridad en BD | `UPDATE`/`INSERT` directos que violan reglas | Rechazados por `CHECK` y `FOREIGN KEY` | ✅ Aprobado |
+| — | Integridad en BD | `UPDATE`/`INSERT` directos que violan reglas | Rechazados por `CHECK` (23514) y `FOREIGN KEY` (23503) | ✅ Aprobado |
+| — | Salud del servicio | `GET /health` y `GET /api/health` | `status: ok` y conexión a PostgreSQL | ✅ Aprobado |
 
-**Total:** 15 pruebas · 15 aprobadas · 0 fallidas.
+**Total:** 16 pruebas · 16 aprobadas · 0 fallidas.
 
 ## 2. Pruebas manuales en navegador
 
@@ -42,16 +43,33 @@ Se ejecutan contra una base de datos temporal, con el servidor real (HTTP) y las
 | Auditor no ve la opción de editar el catálogo | ✅ |
 | Vista móvil (375 px): menú plegable, una columna, sin desplazamiento horizontal | ✅ |
 
-## 3. Defectos encontrados y corregidos
+## 3. Pruebas de contenedores (Docker)
+
+| Caso | Comando / acción | Resultado |
+|---|---|---|
+| Build de la imagen multi-stage | `docker compose up --build -d` | ✅ Imagen de 241 MB, ejecutada con el usuario `node` |
+| Orden de arranque | `depends_on: condition: service_healthy` | ✅ La app arranca cuando PostgreSQL está *healthy* |
+| Conexión por nombre de servicio | Log `Conectando a PostgreSQL en db:5432/auditsys` | ✅ |
+| Carga inicial | Log `Carga inicial: catálogo de 93 controles…` | ✅ |
+| Healthcheck del contenedor | `docker compose ps` | ✅ `Up (healthy)` |
+| Salud | `curl localhost:3000/health` y `/api/health` | ✅ `status: ok`, PostgreSQL 16 |
+| Persistencia | Subir evidencia con archivo → `docker compose down` → `up` | ✅ La evidencia, el archivo y la sesión se conservan |
+| Flujo en navegador contra el contenedor | Login, evaluación, informe versión 1 | ✅ |
+
+## 4. Defectos encontrados y corregidos
 
 | # | Defecto | Corrección |
 |---|---|---|
-| 1 | Campos opcionales no enviados causaban error 500 (el controlador SQLite no acepta `undefined`) | El validador normaliza los valores ausentes a `NULL` |
+| 1 | Campos opcionales no enviados causaban error 500 (el controlador de BD no acepta `undefined`) | El validador normaliza los valores ausentes a `NULL` |
 | 2 | Los radios ocultos del selector de estado generaban desplazamiento horizontal | Se posicionan dentro de su etiqueta |
 | 3 | La vista previa del informe no mostraba contenido | Se corrigió el acceso a `preview.contenido` |
 | 4 | Mensajes de validación con concordancia de género incorrecta («Contraseña es obligatorio») | Mensajes neutros junto al campo |
+| 5 | En Render el disco del contenedor es efímero: SQLite y los archivos subidos se perdían en cada reinicio | Migración a PostgreSQL; los archivos se guardan en `BYTEA` y la clave de sesión en la tabla `app_config` |
+| 6 | El puerto 5432 del equipo ya estaba ocupado | La base de Compose se publica en el 5433 (`DB_PORT`) |
 
-## 4. Pendientes / limitaciones conocidas
+## 5. Pendientes / limitaciones conocidas
 
 - La exportación a PDF usa la impresión del navegador (*Imprimir → Guardar como PDF*), permitida por el documento orientador («PDF o formato imprimible»).
 - No hay recuperación de contraseña por correo; el administrador crea y reactiva cuentas.
+- La base PostgreSQL Free de Render vence a los 30 días; después hay que crear otra (los datos de ejemplo se cargan solos).
+- En el plan Free el servicio se duerme tras 15 minutos sin tráfico: la primera petición tarda unos 50 segundos.

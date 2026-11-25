@@ -1,5 +1,5 @@
 // Lógica de negocio: indicadores (RF07), reglas de transición de estado y consolidado del informe (RF08).
-import { getDb } from '../db.js';
+import { all, one } from '../db.js';
 import { HttpError, MIN_CONTROLES, MAX_CONTROLES, MIN_HALLAZGOS } from '../validators.js';
 
 export const FORMULAS = {
@@ -13,6 +13,13 @@ export const LIMITACIONES =
   'Los indicadores son descriptivos y se calculan exclusivamente a partir de los estados registrados por el auditor. ' +
   'No constituyen una certificación ni una declaración de conformidad con ISO/IEC 27001:2022, y no sustituyen el juicio ' +
   'profesional del auditor. El índice ponderado asigna 0,5 a los controles parciales como convención académica.';
+
+// Orden natural de los códigos ISO (5.2 antes que 5.10)
+export const ORDEN_ISO = (col) => `split_part(${col}, '.', 1)::int, split_part(${col}, '.', 2)::int`;
+
+// Columnas de evidencia sin el contenido binario del archivo
+export const EVIDENCIA_COLS = `v.id_evidencia, v.id_evaluacion, v.codigo, v.descripcion, v.tipo, v.fuente, v.fecha, v.referencia,
+  v.archivo_nombre, v.archivo_tipo, (v.archivo_datos IS NOT NULL) AS tiene_archivo, v.es_simulada, v.creado_en`;
 
 const round1 = (n) => Math.round(n * 10) / 10;
 
@@ -39,10 +46,10 @@ export function calcularIndicadores(estados) {
   };
 }
 
-export function getAuditoria(id) {
-  const a = getDb().prepare(`
+export async function getAuditoria(id) {
+  const a = await one(`
     SELECT a.*, u.nombre AS auditor_nombre, u.correo AS auditor_correo
-    FROM auditoria a JOIN usuario u ON u.id_usuario = a.id_auditor WHERE a.id_auditoria = ?`).get(id);
+    FROM auditoria a JOIN usuario u ON u.id_usuario = a.id_auditor WHERE a.id_auditoria = ?`, [id]);
   if (!a) throw new HttpError(404, 'Auditoría no encontrada.');
   return a;
 }
@@ -56,32 +63,32 @@ export function assertEditable(aud, user, { allowClosed = false } = {}) {
 }
 
 export function getEvaluaciones(idAuditoria) {
-  return getDb().prepare(`
+  return all(`
     SELECT e.*, c.codigo_iso, c.nombre AS control_nombre, c.categoria, c.criterio, c.pregunta, c.evidencia_sugerida, c.fuente,
       (SELECT COUNT(*) FROM evidencia v WHERE v.id_evaluacion = e.id_evaluacion) AS n_evidencias,
       (SELECT COUNT(*) FROM hallazgo h WHERE h.id_evaluacion = e.id_evaluacion) AS n_hallazgos
     FROM evaluacion_control e JOIN control c ON c.id_control = e.id_control
     WHERE e.id_auditoria = ?
-    ORDER BY CAST(substr(c.codigo_iso,1,1) AS INT), CAST(substr(c.codigo_iso,3) AS INT)`).all(idAuditoria);
+    ORDER BY ${ORDEN_ISO('c.codigo_iso')}`, [idAuditoria]);
 }
 
-export function getHallazgos(idAuditoria) {
-  const db = getDb();
-  const hs = db.prepare(`
+export async function getHallazgos(idAuditoria) {
+  const hs = await all(`
     SELECT h.*, c.codigo_iso, c.nombre AS control_nombre, e.estado AS estado_control
     FROM hallazgo h JOIN evaluacion_control e ON e.id_evaluacion = h.id_evaluacion
     JOIN control c ON c.id_control = e.id_control
-    WHERE h.id_auditoria = ? ORDER BY h.codigo`).all(idAuditoria);
-  const recs = db.prepare('SELECT * FROM recomendacion WHERE id_hallazgo = ? ORDER BY codigo');
-  return hs.map((h) => ({ ...h, recomendaciones: recs.all(h.id_hallazgo) }));
+    WHERE h.id_auditoria = ? ORDER BY h.codigo`, [idAuditoria]);
+  const recs = await all(`SELECT r.* FROM recomendacion r JOIN hallazgo h ON h.id_hallazgo = r.id_hallazgo
+    WHERE h.id_auditoria = ? ORDER BY r.codigo`, [idAuditoria]);
+  return hs.map((h) => ({ ...h, recomendaciones: recs.filter((r) => r.id_hallazgo === h.id_hallazgo) }));
 }
 
 export function getEvidencias(idAuditoria) {
-  return getDb().prepare(`
-    SELECT v.*, c.codigo_iso, c.nombre AS control_nombre, e.estado AS estado_control
+  return all(`
+    SELECT ${EVIDENCIA_COLS}, c.codigo_iso, c.nombre AS control_nombre, e.estado AS estado_control
     FROM evidencia v JOIN evaluacion_control e ON e.id_evaluacion = v.id_evaluacion
     JOIN control c ON c.id_control = e.id_control
-    WHERE e.id_auditoria = ? ORDER BY CAST(substr(v.codigo,4) AS INT)`).all(idAuditoria);
+    WHERE e.id_auditoria = ? ORDER BY split_part(v.codigo, '-', 2)::int`, [idAuditoria]);
 }
 
 /**
@@ -90,13 +97,13 @@ export function getEvidencias(idAuditoria) {
  *  - EN_REVISION: todos evaluados; Implementado/Parcial con ≥1 evidencia (CP-06).
  *  - CERRADA: ≥3 hallazgos y cada hallazgo con ≥1 recomendación (CP-08).
  */
-export function verificarTransicion(aud, destino) {
-  const evals = getEvaluaciones(aud.id_auditoria);
-  const problemas = [];
+export async function verificarTransicion(aud, destino) {
   const orden = ['BORRADOR', 'EN_EJECUCION', 'EN_REVISION', 'CERRADA'];
   const iDest = orden.indexOf(destino);
   if (iDest < 0) return ['Estado destino no válido.'];
   if (aud.estado === 'CERRADA') return ['La auditoría ya está cerrada.'];
+  const evals = await getEvaluaciones(aud.id_auditoria);
+  const problemas = [];
 
   if (iDest >= 1) {
     if (evals.length < MIN_CONTROLES || evals.length > MAX_CONTROLES)
@@ -110,7 +117,7 @@ export function verificarTransicion(aud, destino) {
       problemas.push(`Los controles Implementado/Parcial requieren al menos una evidencia: ${sinEv.map((e) => e.codigo_iso).join(', ')}.`);
   }
   if (iDest >= 3) {
-    const hs = getHallazgos(aud.id_auditoria);
+    const hs = await getHallazgos(aud.id_auditoria);
     if (hs.length < MIN_HALLAZGOS) problemas.push(`Se requieren al menos ${MIN_HALLAZGOS} hallazgos documentados (actualmente ${hs.length}).`);
     const sinRec = hs.filter((h) => h.recomendaciones.length === 0);
     if (sinRec.length) problemas.push(`Hallazgos sin recomendación: ${sinRec.map((h) => h.codigo).join(', ')}.`);
@@ -119,12 +126,12 @@ export function verificarTransicion(aud, destino) {
 }
 
 /** Consolida toda la información de la auditoría para el informe (instantánea). */
-export function consolidar(idAuditoria) {
-  const aud = getAuditoria(idAuditoria);
-  const evaluaciones = getEvaluaciones(idAuditoria);
+export async function consolidar(idAuditoria) {
+  const aud = await getAuditoria(idAuditoria);
+  const [evaluaciones, hallazgos, evidencias] = await Promise.all([
+    getEvaluaciones(idAuditoria), getHallazgos(idAuditoria), getEvidencias(idAuditoria),
+  ]);
   const indicadores = calcularIndicadores(evaluaciones.map((e) => e.estado));
-  const hallazgos = getHallazgos(idAuditoria);
-  const evidencias = getEvidencias(idAuditoria);
   const porSeveridad = { ALTA: 0, MEDIA: 0, BAJA: 0 };
   hallazgos.forEach((h) => porSeveridad[h.severidad]++);
   const pct = (n) => (indicadores.aplicables ? `${String(round1((100 * n) / indicadores.aplicables)).replace('.', ',')} %` : '—');

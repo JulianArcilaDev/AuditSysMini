@@ -1,21 +1,23 @@
 // Autenticación (RNF04): contraseñas con scrypt + sal, token firmado HMAC-SHA256
 // enviado en cookie HttpOnly/SameSite=Strict. Roles: 'auditor' y 'admin'.
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { DATA_DIR, getDb } from './db.js';
+import { one, query } from './db.js';
 
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000; // 8 horas
 export const COOKIE = 'auditsys_session';
 
-function loadSecret() {
-  if (process.env.AUDITSYS_SECRET) return process.env.AUDITSYS_SECRET;
-  const f = path.join(DATA_DIR, '.secret');
-  if (!fs.existsSync(f)) fs.writeFileSync(f, crypto.randomBytes(48).toString('hex'), { mode: 0o600 });
-  return fs.readFileSync(f, 'utf8').trim();
+let SECRET = null;
+
+/** Carga la clave de firma: AUDITSYS_SECRET o, si no existe, una aleatoria guardada en la BD. */
+export async function initSecret() {
+  if (process.env.AUDITSYS_SECRET) { SECRET = process.env.AUDITSYS_SECRET; return; }
+  await query("INSERT INTO app_config (clave, valor) VALUES ('session_secret', ?) ON CONFLICT (clave) DO NOTHING", [crypto.randomBytes(48).toString('hex')]);
+  SECRET = (await one("SELECT valor FROM app_config WHERE clave = 'session_secret'")).valor;
 }
-let SECRET;
-const secret = () => (SECRET ??= loadSecret());
+const secret = () => {
+  if (!SECRET) throw new Error('La clave de sesión no se ha inicializado.');
+  return SECRET;
+};
 
 export function hashPassword(plain) {
   const salt = crypto.randomBytes(16);
@@ -43,7 +45,7 @@ export function readToken(token) {
   if (!token || !token.includes('.')) return null;
   const [payload, sig] = token.split('.');
   const good = sign(payload);
-  if (sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return null;
+  if (!sig || sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (data.exp < Date.now()) return null;
@@ -56,19 +58,21 @@ function parseCookies(header = '') {
     .map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
 }
 
+// Cookie Secure: por defecto en producción (Render sirve HTTPS). COOKIE_SECURE=false para Docker local por HTTP.
+const cookieSecure = () => (process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : process.env.NODE_ENV === 'production');
+
 export function setSessionCookie(res, token) {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${TOKEN_TTL_MS / 1000}${secure}`);
+  res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${TOKEN_TTL_MS / 1000}${cookieSecure() ? '; Secure' : ''}`);
 }
 export function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${cookieSecure() ? '; Secure' : ''}`);
 }
 
 /** Middleware: exige sesión válida y usuario activo. */
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const data = readToken(parseCookies(req.headers.cookie)[COOKIE]);
   if (!data) return res.status(401).json({ error: 'Sesión no válida o expirada. Inicie sesión.' });
-  const user = getDb().prepare('SELECT id_usuario, nombre, correo, rol, activo FROM usuario WHERE id_usuario = ?').get(data.sub);
+  const user = await one('SELECT id_usuario, nombre, correo, rol, activo FROM usuario WHERE id_usuario = ?', [data.sub]);
   if (!user || !user.activo) return res.status(401).json({ error: 'Usuario inactivo o inexistente.' });
   req.user = user;
   next();

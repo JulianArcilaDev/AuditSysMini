@@ -47,7 +47,7 @@ erDiagram
     text fuente
     date fecha
     text referencia
-    text archivo_ruta
+    bytea archivo_datos
     int es_simulada }
   HALLAZGO { int id_hallazgo PK
     int id_evaluacion FK
@@ -71,7 +71,7 @@ erDiagram
     text contenido "instantánea JSON" }
 ```
 
-### Reglas de integridad en la base de datos (`server/schema.sql`)
+### Reglas de integridad en la base de datos (`server/schema.sql`, PostgreSQL 16)
 
 | Entidad | Restricciones |
 |---|---|
@@ -79,10 +79,10 @@ erDiagram
 | control | `codigo_iso` único; criterio obligatorio; categoría dentro de las 4 de la norma |
 | auditoria | `fecha_fin >= fecha_inicio`; estado dentro del ciclo de vida; FK a usuario |
 | evaluacion_control | par (auditoría, control) único; observación obligatoria si está evaluado; `NO_APLICABLE` exige justificación |
-| evidencia | siempre ligada a una evaluación; exige referencia o archivo; `es_simulada` por defecto 1 |
+| evidencia | siempre ligada a una evaluación; exige referencia o archivo; archivo ≤ 5 MB guardado en `BYTEA`; `es_simulada` por defecto 1 |
 | hallazgo | condición, criterio, causa, efecto y severidad obligatorios; código único por auditoría |
 | recomendacion | siempre ligada a un hallazgo; prioridad y plazo entre 1 y 730 días |
-| informe | versión única por auditoría; guarda indicadores e instantánea |
+| informe | versión única por auditoría; guarda indicadores e instantánea en `JSONB` |
 
 Las eliminaciones usan `ON DELETE CASCADE` para no dejar registros huérfanos (solo se pueden eliminar auditorías en borrador).
 
@@ -133,6 +133,15 @@ flowchart TB
     RT --> DB[db.js]
   end
   API -- HTTP/JSON + cookie HttpOnly --> MW
-  DB --> SQL[(SQLite · auditsys.db)]
-  RT --> FS[(data/uploads · archivos de evidencia)]
+  DB --> SQL[(PostgreSQL 16 · tablas + archivos de evidencia en BYTEA)]
+```
+
+## 4. Despliegue
+
+```mermaid
+flowchart LR
+  Dev[git push a main] --> GH[GitHub · JulianArcilaDev/AuditSysMini]
+  GH -- Auto-Deploy --> RW[Render Web Service · Docker]
+  RW -- red interna --> RP[(Render PostgreSQL 16)]
+  U([Usuario]) -- HTTPS --> RW
 ```

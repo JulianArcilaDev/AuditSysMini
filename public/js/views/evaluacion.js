@@ -77,7 +77,7 @@ export async function render(el, [id, idEval]) {
         ${ev.evidencias.length ? ev.evidencias.map((v) => html`<div class="ev-item">
           <div><strong>${v.codigo}</strong> · ${v.descripcion} ${v.es_simulada ? html`<span class="chip sim">Simulada</span>` : ''}<br>
             <small>${v.tipo} · Fuente: ${v.fuente} · ${fecha(v.fecha)}${v.referencia ? html` · Ref.: ${v.referencia}` : ''}</small>
-            ${v.archivo_ruta ? html`<br><a href="/api/evidencias/${v.id_evidencia}/archivo">${icon('file')} ${v.archivo_nombre}</a>` : ''}</div>
+            ${v.tiene_archivo ? html`<br><a href="/api/evidencias/${v.id_evidencia}/archivo">${icon('file')} ${v.archivo_nombre}</a>` : ''}</div>
           ${campo ? html`<button class="btn ghost sm" data-del-ev="${v.id_evidencia}" aria-label="Eliminar evidencia ${v.codigo}">${icon('trash')}</button>` : ''}
         </div>`) : html`<p class="muted">Sin evidencias registradas para este control.</p>`}
       </div>
