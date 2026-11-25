@@ -1,4 +1,5 @@
 node_modules/
-data/
+# Solo la carpeta data/ de la raíz (datos locales); server/data/ contiene el catálogo y sí se versiona
+/data/
 .env
 .DS_Store
